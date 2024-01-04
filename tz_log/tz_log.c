@@ -35,10 +35,10 @@
 #include "misc/qseecomi.h"
 
 /* QSEE_LOG_BUF_SIZE = 32K */
-#define QSEE_LOG_BUF_SIZE 0x8000
+#define QSEE_LOG_BUF_SIZE 0x20000
 
 /* enlarged qsee log buf size is 128K by default */
-#define QSEE_LOG_BUF_SIZE_V2 0x20000
+#define QSEE_LOG_BUF_SIZE_V2 0x80000
 
 /* Tme log buffer size 20K */
 #define TME_LOG_BUF_SIZE 0x5000
@@ -776,6 +776,9 @@ static int _disp_log_stats(struct tzdbg_log_t *log,
 	pr_debug("diag_buf wrap = %u, offset = %u\n",
 		log->log_pos.wrap, log->log_pos.offset);
 	while (log_start->offset == log->log_pos.offset) {
+#if 1
+        return 0;
+#else
 		/*
 		 * No data in ring buffer,
 		 * so we'll hang around until something happens
@@ -785,12 +788,12 @@ static int _disp_log_stats(struct tzdbg_log_t *log,
 		if (t != 0) {
 			/* Some event woke us up, so let's quit */
 			return 0;
-}
+        }
 
 		if (buf_idx == TZDBG_LOG)
 			memcpy_fromio((void *)tzdbg.diag_buf, tzdbg.virt_iobase,
 						debug_rw_buf_size);
-
+#endif
 	}
 
 	max_len = (count > debug_rw_buf_size) ? debug_rw_buf_size : count;
@@ -851,6 +854,9 @@ static int _disp_log_stats_v2(struct tzdbg_log_v2_t *log,
 		log->log_pos.wrap, log->log_pos.offset);
 
 	while (log_start->offset == log->log_pos.offset) {
+#if 1
+        return 0;
+#else
 		/*
 		 * No data in ring buffer,
 		 * so we'll hang around until something happens
@@ -865,7 +871,7 @@ static int _disp_log_stats_v2(struct tzdbg_log_v2_t *log,
 		if (buf_idx == TZDBG_LOG)
 			memcpy_fromio((void *)tzdbg.diag_buf, tzdbg.virt_iobase,
 						debug_rw_buf_size);
-
+#endif
 	}
 
 	max_len = (count > debug_rw_buf_size) ? debug_rw_buf_size : count;
@@ -896,7 +902,6 @@ static int __disp_hyp_log_stats(uint8_t *log,
 			size_t count, uint32_t buf_idx)
 {
 	struct hypdbg_t *hyp = tzdbg.hyp_diag_buf;
-	unsigned long t = 0;
 	uint32_t wrap_start;
 	uint32_t wrap_end;
 	uint32_t wrap_cnt;
@@ -927,11 +932,14 @@ static int __disp_hyp_log_stats(uint8_t *log,
 	}
 
 	while (log_start->offset == hyp->log_pos.offset) {
+#if 1
+        return 0;
+#else
 		/*
 		 * No data in ring buffer,
 		 * so we'll hang around until something happens
 		 */
-		t = msleep_interruptible(50);
+		unsigned long t = msleep_interruptible(50);
 		if (t != 0) {
 			/* Some event woke us up, so let's quit */
 			return 0;
@@ -940,6 +948,7 @@ static int __disp_hyp_log_stats(uint8_t *log,
 		/* TZDBG_HYP_LOG */
 		memcpy_fromio((void *)tzdbg.hyp_diag_buf, tzdbg.hyp_virt_iobase,
 						tzdbg.hyp_debug_rw_buf_size);
+#endif
 	}
 
 	max_len = (count > tzdbg.hyp_debug_rw_buf_size) ?
@@ -1458,13 +1467,16 @@ static int tzdbg_register_qsee_log_buf(struct platform_device *pdev)
 	if (tzdbg.is_enlarged_buf) {
 		if (of_property_read_u32((&pdev->dev)->of_node,
 			"qseelog-buf-size-v2", &qseelog_buf_size)) {
-			pr_debug("Enlarged qseelog buf size isn't defined\n");
+            /* pr_debug("Enlarged qseelog buf size isn't defined\n"); */
+            pr_err("#### Enlarged qseelog buf size isn't defined\n");
 			qseelog_buf_size = QSEE_LOG_BUF_SIZE_V2;
 		}
 	}  else {
 		qseelog_buf_size = QSEE_LOG_BUF_SIZE;
+        pr_info("#### QseeLog buf size is 0x%x \n", qseelog_buf_size);
 	}
-	pr_debug("qseelog buf size is 0x%x\n", qseelog_buf_size);
+	/* pr_debug("qseelog buf size is 0x%x\n", qseelog_buf_size); */
+    pr_info("############ Qseelog buf size is 0x%x\n", qseelog_buf_size);
 
 	buf = dma_alloc_coherent(&pdev->dev,
 			qseelog_buf_size, &coh_pmem, GFP_KERNEL);
