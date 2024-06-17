@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2023 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2023-2024 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include <linux/dma-mapping.h>
@@ -283,8 +283,12 @@ int qcedev_check_and_map_buffer(void *handle,
 
 	return 0;
 unmap:
-	if (!found)
+	if (!found) {
 		msm_gpce_ion_smmu_unmap(&(binfo->ion_buf), drv_handles);
+		mutex_lock(&qce_hndl->registeredbufs.lock);
+		list_del(&binfo->list);
+		mutex_unlock(&qce_hndl->registeredbufs.lock);
+	}
 error:
 	kfree(binfo);
 	return rc;
