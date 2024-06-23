@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2022-2023 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2022-2024 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 #include <linux/file.h>
 #include <linux/fs.h>
@@ -493,39 +493,56 @@ static int __qseecom_send_command(struct qseecom_handle *handle, void *send_buf,
 				  Object_NULL, Object_NULL);
 }
 
+static int __qseecom_process_listener_from_smcinvoke(uint32_t *result,
+		u64 *response_type, unsigned int *data)
+{
+	/* this API is not supported by compat */
+	pr_debug("%s is not supported by compat\n", __func__);
+	return -EOPNOTSUPP;
+}
+
 #if IS_ENABLED(CONFIG_QSEECOM_PROXY)
 const static struct qseecom_drv_ops qseecom_driver_ops = {
-       .qseecom_send_command = __qseecom_send_command,
-       .qseecom_start_app = __qseecom_start_app,
-       .qseecom_shutdown_app = __qseecom_shutdown_app,
+	.qseecom_send_command = __qseecom_send_command,
+	.qseecom_start_app = __qseecom_start_app,
+	.qseecom_shutdown_app = __qseecom_shutdown_app,
+	.qseecom_process_listener_from_smcinvoke = __qseecom_process_listener_from_smcinvoke,
 };
 
 int get_qseecom_kernel_fun_ops(void)
 {
-        return provide_qseecom_kernel_fun_ops(&qseecom_driver_ops);
+	return provide_qseecom_kernel_fun_ops(&qseecom_driver_ops);
 }
 #else
 
 int qseecom_start_app(struct qseecom_handle **handle,
-                    char *app_name, uint32_t size)
+		char *app_name, uint32_t size)
 {
-    return __qseecom_start_app(handle, app_name, size);
+	return __qseecom_start_app(handle, app_name, size);
 }
-EXPORT_SYMBOL(qseecom_start_app);
+EXPORT_SYMBOL_GPL(qseecom_start_app);
 
 int qseecom_shutdown_app(struct qseecom_handle **handle)
 {
-    return __qseecom_shutdown_app(handle);
+	return __qseecom_shutdown_app(handle);
 }
-EXPORT_SYMBOL(qseecom_shutdown_app);
+EXPORT_SYMBOL_GPL(qseecom_shutdown_app);
 
 int qseecom_send_command(struct qseecom_handle *handle, void *send_buf,
-            uint32_t sbuf_len, void *resp_buf, uint32_t rbuf_len)
+		uint32_t sbuf_len, void *resp_buf, uint32_t rbuf_len)
 {
-    return __qseecom_send_command(handle, send_buf, sbuf_len,
-                        resp_buf, rbuf_len);
+	return __qseecom_send_command(handle, send_buf, sbuf_len,
+			resp_buf, rbuf_len);
 }
-EXPORT_SYMBOL(qseecom_send_command);
+EXPORT_SYMBOL_GPL(qseecom_send_command);
+
+int qseecom_process_listener_from_smcinvoke(uint32_t *result,
+		u64 *response_type, unsigned int *data)
+{
+	return __qseecom_process_listener_from_smcinvoke(result,
+			response_type, data);
+}
+EXPORT_SYMBOL_GPL(qseecom_process_listener_from_smcinvoke);
 #endif
 
 #endif
