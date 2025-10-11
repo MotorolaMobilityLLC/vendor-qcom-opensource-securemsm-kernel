@@ -480,6 +480,10 @@ struct tzdbg {
 	bool is_full_encrypted_tz_logs_enabled;
 	int tz_diag_minor_version;
 	int tz_diag_major_version;
+#if IS_ENABLED(CONFIG_MOTO_TZ_QSEE_LOG)
+	struct workqueue_struct*	heartbeat_work_q;
+	struct work_struct			heartbeat_work;
+#endif
 };
 
 struct tzbsp_encr_log_t {
@@ -1039,6 +1043,129 @@ static uint32_t _copy_to_dispbuf_with_realtime(struct tzdbg_log_t *log,
 }
 #endif
 
+#if IS_ENABLED(CONFIG_MOTO_TZ_QSEE_LOG) || IS_ENABLED(CONFIG_MOTO_TZ_READ_NOWAIT)
+static int _disp_log_stats_nowait(struct tzdbg_log_t *log,
+			struct tzdbg_log_pos_t *log_start, uint32_t log_len,
+			size_t count, uint32_t buf_idx)
+{
+	uint32_t wrap_start = 0;
+	uint32_t wrap_end = 0;
+	uint32_t wrap_cnt = 0;
+	uint32_t max_len = 0;
+	uint32_t len = 0;
+
+	wrap_start = log_start->wrap;
+	wrap_end = log->log_pos.wrap;
+
+	/* Calculate difference in # of buffer wrap-arounds */
+	if (wrap_end >= wrap_start)
+		wrap_cnt = wrap_end - wrap_start;
+	else {
+		/* wrap counter has wrapped around, invalidate start position */
+		wrap_cnt = 2;
+	}
+
+	if (wrap_cnt > 1) {
+		/* end position has wrapped around more than once, */
+		/* current start no longer valid                   */
+		log_start->wrap = log->log_pos.wrap - 1;
+		log_start->offset = (log->log_pos.offset + 1) % log_len;
+	} else if ((wrap_cnt == 1) &&
+		(log->log_pos.offset > log_start->offset)) {
+		/* end position has overwritten start */
+		log_start->offset = (log->log_pos.offset + 1) % log_len;
+	}
+
+	pr_debug("diag_buf wrap = %u, offset = %u\n",
+		log->log_pos.wrap, log->log_pos.offset);
+	if (log_start->offset == log->log_pos.offset) {
+		if (buf_idx == TZDBG_LOG) {
+			mutex_lock(&tzdbg_mutex);
+			memcpy_fromio((void *)tzdbg.diag_buf, tzdbg.virt_iobase,
+						debug_rw_buf_size);
+			mutex_unlock(&tzdbg_mutex);
+		} else
+			return 0;
+		if (log_start->offset == log->log_pos.offset)
+			return 0;
+	}
+
+	pr_info("#%d : log[%d]-position : (%d,%d) - (%d,%d)", __LINE__, buf_idx,
+			log_start->wrap, log_start->offset,
+			log->log_pos.wrap, log->log_pos.offset);
+
+	max_len = (count > debug_rw_buf_size) ? debug_rw_buf_size : count;
+
+	pr_debug("diag_buf wrap = %u, offset = %u\n",
+		log->log_pos.wrap, log->log_pos.offset);
+
+#if (KERNEL_VERSION(6, 12, 0) <= LINUX_VERSION_CODE) && defined(CONFIG_TZLOG_TIME_CONSOLIDATE)
+	if (g_realtime_consolidation_enable)
+		len = _copy_to_dispbuf_with_realtime(log, log_start, log_len, max_len,
+			tzdbg.disp_buf, 0);
+	else
+		len = _copy_to_dispbuf(log, log_start, log_len, max_len, tzdbg.disp_buf, 0);
+#else
+	len = _copy_to_dispbuf(log, log_start, log_len, max_len, tzdbg.disp_buf, 0);
+#endif
+	/*
+	 * return buffer to caller
+	 */
+	tzdbg.stat[buf_idx].data = tzdbg.disp_buf;
+	return len;
+}
+#endif  // IS_ENABLED(CONFIG_MOTO_TZ_QSEE_LOG) || IS_ENABLED(CONFIG_MOTO_TZ_READ_NOWAIT)
+
+#if IS_ENABLED(CONFIG_MOTO_TZ_QSEE_LOG)
+
+/*
+ * Print the content line by line in tzdbg.disp_buf[]
+ */
+static void dump(int len)
+{
+	tzdbg.disp_buf[len] = '\0';
+	char *curr = tzdbg.disp_buf;
+	char *end = tzdbg.disp_buf + len;
+	char *next;
+	for ( ; curr < end; curr = next + 1) {
+		next = strchr(curr, '\n');
+		if (next == NULL) {
+			len = strlen(curr);
+			if (len <= 0)
+				continue;
+			next = curr + len;
+		} else
+			next[0] = '\0';
+		pr_info("%s", curr);
+	}
+}
+
+static struct tzdbg_log_pos_t g_bsp_log_start = {0};
+
+static void dump_tz_log(void)
+{
+	struct tzdbg_log_t *log_ptr = (struct tzdbg_log_t *)((unsigned char *)tzdbg.diag_buf +
+			tzdbg.diag_buf->ring_off - offsetof(struct tzdbg_log_t, log_buf));
+	int len = _disp_log_stats_nowait(log_ptr, &g_bsp_log_start,
+			tzdbg.diag_buf->ring_len - sizeof(struct tzdbg_log_pos_t),
+			debug_rw_buf_size, TZDBG_LOG);
+	if (0 == len)
+		return;
+	pr_info("#%d : log[%d]-position : (%d,%d) - (%d,%d)", __LINE__, TZDBG_LOG,
+			g_bsp_log_start.wrap, g_bsp_log_start.offset,
+			log_ptr->log_pos.wrap, log_ptr->log_pos.offset);
+	pr_info("%d-byte tz-bsp-log already read", len);
+	dump(len);
+	if (atomic_read(&is_rd_locked)) {
+		atomic_set(&is_rd_locked, 0);
+		mutex_unlock(&tzdbg_mutex);
+	}
+}
+
+static bool stop_dump_qsee = false;
+
+#endif  // IS_ENABLED(CONFIG_MOTO_TZ_QSEE_LOG)
+
 static int _disp_log_stats(struct tzdbg_log_t *log,
 			struct tzdbg_log_pos_t *log_start, uint32_t log_len,
 			size_t count, uint32_t buf_idx)
@@ -1074,6 +1201,11 @@ static int _disp_log_stats(struct tzdbg_log_t *log,
 	pr_debug("diag_buf wrap = %u, offset = %u\n",
 		log->log_pos.wrap, log->log_pos.offset);
 	while (log_start->offset == log->log_pos.offset) {
+#if IS_ENABLED(CONFIG_MOTO_TZ_QSEE_LOG)
+		if ((buf_idx == TZDBG_QSEE_LOG) && !stop_dump_qsee)
+			dump_tz_log();
+#endif
+
 		/*
 		 * No data in ring buffer,
 		 * so we'll hang around until something happens
@@ -1093,6 +1225,11 @@ static int _disp_log_stats(struct tzdbg_log_t *log,
 		}
 
 	}
+
+#if IS_ENABLED(CONFIG_MOTO_TZ_QSEE_LOG)
+	if ((buf_idx == TZDBG_QSEE_LOG) && !stop_dump_qsee)
+		dump_tz_log();
+#endif
 
 	max_len = (count > debug_rw_buf_size) ? debug_rw_buf_size : count;
 
@@ -1248,6 +1385,108 @@ static uint32_t _copy_to_dispbuf_with_realtime_v2(struct tzdbg_log_v2_t *log,
 }
 #endif
 
+#if IS_ENABLED(CONFIG_MOTO_TZ_QSEE_LOG) || IS_ENABLED(CONFIG_MOTO_TZ_READ_NOWAIT)
+static int _disp_log_stats_v2_nowait(struct tzdbg_log_v2_t *log,
+			struct tzdbg_log_pos_v2_t *log_start, uint32_t log_len,
+			size_t count, uint32_t buf_idx)
+{
+	uint32_t wrap_start = 0;
+	uint32_t wrap_end = 0;
+	uint32_t wrap_cnt = 0;
+	uint32_t max_len = 0;
+	uint32_t len = 0;
+
+	wrap_start = log_start->wrap;
+	wrap_end = log->log_pos.wrap;
+
+	/* Calculate difference in # of buffer wrap-arounds */
+	if (wrap_end >= wrap_start)
+		wrap_cnt = wrap_end - wrap_start;
+	else {
+		/* wrap counter has wrapped around, invalidate start position */
+		wrap_cnt = 2;
+}
+
+	if (wrap_cnt > 1) {
+		/* end position has wrapped around more than once, */
+		/* current start no longer valid                   */
+		log_start->wrap = log->log_pos.wrap - 1;
+		log_start->offset = (log->log_pos.offset + 1) % log_len;
+	} else if ((wrap_cnt == 1) &&
+		(log->log_pos.offset > log_start->offset)) {
+		/* end position has overwritten start */
+		log_start->offset = (log->log_pos.offset + 1) % log_len;
+	}
+	pr_debug("diag_buf wrap = %u, offset = %u\n",
+		log->log_pos.wrap, log->log_pos.offset);
+
+	if (log_start->offset == log->log_pos.offset) {
+		if (buf_idx == TZDBG_LOG) {
+			mutex_lock(&tzdbg_mutex);
+			memcpy_fromio((void *)tzdbg.diag_buf, tzdbg.virt_iobase,
+						debug_rw_buf_size);
+			mutex_unlock(&tzdbg_mutex);
+		} else
+			return 0;
+		if (log_start->offset == log->log_pos.offset)
+			return 0;
+	}
+
+	pr_info("#%d : log[%d]-position : (%d,%d) - (%d,%d)", __LINE__, buf_idx,
+			log_start->wrap, log_start->offset,
+			log->log_pos.wrap, log->log_pos.offset);
+
+	max_len = (count > debug_rw_buf_size) ? debug_rw_buf_size : count;
+
+	pr_debug("diag_buf wrap = %u, offset = %u\n",
+		log->log_pos.wrap, log->log_pos.offset);
+	mutex_lock(&tzdbg_mutex);
+	atomic_set(&is_rd_locked, 1);
+#if (KERNEL_VERSION(6, 12, 0) <= LINUX_VERSION_CODE) && defined(CONFIG_TZLOG_TIME_CONSOLIDATE)
+	if (g_realtime_consolidation_enable)
+		len = _copy_to_dispbuf_with_realtime_v2(log, log_start, log_len, max_len,
+			tzdbg.disp_buf, 0);
+	else
+		len = _copy_to_dispbuf_v2(log, log_start, log_len, max_len, tzdbg.disp_buf, 0);
+#else
+	len = _copy_to_dispbuf_v2(log, log_start, log_len, max_len, tzdbg.disp_buf, 0);
+#endif
+
+	/*
+	 * return buffer to caller
+	 */
+	tzdbg.stat[buf_idx].data = tzdbg.disp_buf;
+
+	return len;
+}
+#endif  // IS_ENABLED(CONFIG_MOTO_TZ_QSEE_LOG) || IS_ENABLED(CONFIG_MOTO_TZ_READ_NOWAIT)
+
+#if IS_ENABLED(CONFIG_MOTO_TZ_QSEE_LOG)
+
+static struct tzdbg_log_pos_v2_t g_bsp_log_start_v2 = {0};
+
+static void dump_tz_log_v2(void)
+{
+	struct tzdbg_log_v2_t *log_v2_ptr = (struct tzdbg_log_v2_t *)((unsigned char *)tzdbg.diag_buf +
+			tzdbg.diag_buf->ring_off - offsetof(struct tzdbg_log_v2_t, log_buf));
+	int len = _disp_log_stats_v2_nowait(log_v2_ptr, &g_bsp_log_start_v2,
+			tzdbg.diag_buf->ring_len - sizeof(struct tzdbg_log_pos_v2_t),
+			debug_rw_buf_size, TZDBG_LOG);
+	if (0 == len)
+		return;
+	pr_info("#%d : log[%d]-position : (%d,%d) - (%d,%d)", __LINE__, TZDBG_LOG,
+			g_bsp_log_start_v2.wrap, g_bsp_log_start_v2.offset,
+			log_v2_ptr->log_pos.wrap, log_v2_ptr->log_pos.offset);
+	pr_info("%d-byte tz-bsp-log already read", len);
+	dump(len);
+	if (atomic_read(&is_rd_locked)) {
+		atomic_set(&is_rd_locked, 0);
+		mutex_unlock(&tzdbg_mutex);
+	}
+}
+
+#endif  // IS_ENABLED(CONFIG_MOTO_TZ_QSEE_LOG)
+
 static int _disp_log_stats_v2(struct tzdbg_log_v2_t *log,
 			struct tzdbg_log_pos_v2_t *log_start, uint32_t log_len,
 			size_t count, uint32_t buf_idx)
@@ -1283,6 +1522,11 @@ static int _disp_log_stats_v2(struct tzdbg_log_v2_t *log,
 		log->log_pos.wrap, log->log_pos.offset);
 
 	while (log_start->offset == log->log_pos.offset) {
+#if IS_ENABLED(CONFIG_MOTO_TZ_QSEE_LOG)
+		if ((buf_idx == TZDBG_QSEE_LOG) && !stop_dump_qsee)
+			dump_tz_log_v2();
+#endif
+
 		/*
 		 * No data in ring buffer,
 		 * so we'll hang around until something happens
@@ -1301,6 +1545,11 @@ static int _disp_log_stats_v2(struct tzdbg_log_v2_t *log,
 			mutex_unlock(&tzdbg_mutex);
 		}
 	}
+
+#if IS_ENABLED(CONFIG_MOTO_TZ_QSEE_LOG)
+	if ((buf_idx == TZDBG_QSEE_LOG) && !stop_dump_qsee)
+		dump_tz_log_v2();
+#endif
 
 	max_len = (count > debug_rw_buf_size) ? debug_rw_buf_size : count;
 
@@ -1537,6 +1786,10 @@ static int check_tz_qsee_log_state(struct tzdbg_log_t *log, struct tzdbg_log_pos
 	return ret;
 }
 
+#if IS_ENABLED(CONFIG_MOTO_TZ_READ_NOWAIT)
+static bool g_read_nowait = false;
+#endif
+
 static int _disp_tz_log_stats(struct clients_info_t *clients_info,
 		size_t count, bool check_log_state)
 {
@@ -1562,6 +1815,17 @@ static int _disp_tz_log_stats(struct clients_info_t *clients_info,
 	if (check_log_state)
 		return check_tz_qsee_log_state(log_ptr, &clients_info->log_start,
 				log_v2_ptr, &clients_info->log_start_v2);
+
+#if IS_ENABLED(CONFIG_MOTO_TZ_READ_NOWAIT)
+	if (g_read_nowait) {
+		if (!tzdbg.is_enlarged_buf)
+			return _disp_log_stats_nowait(log_ptr, &clients_info->log_start,
+					tzdbg.diag_buf->ring_len, count, TZDBG_LOG);
+
+		return _disp_log_stats_v2_nowait(log_v2_ptr, &clients_info->log_start_v2,
+				tzdbg.diag_buf->ring_len, count, TZDBG_LOG);
+	}
+#endif
 
 	if (!tzdbg.is_enlarged_buf)
 		return _disp_log_stats(log_ptr, &clients_info->log_start,
@@ -1662,6 +1926,19 @@ static int _disp_qsee_log_stats(struct clients_info_t *clients_info,
 	if (check_log_state)
 		return check_tz_qsee_log_state(g_qsee_log, &clients_info->log_start,
 			g_qsee_log_v2, &clients_info->log_start_v2);
+
+#if IS_ENABLED(CONFIG_MOTO_TZ_READ_NOWAIT)
+	if (g_read_nowait) {
+		if (!tzdbg.is_enlarged_buf)
+			return _disp_log_stats_nowait(g_qsee_log, &clients_info->log_start,
+				QSEE_LOG_BUF_SIZE - sizeof(struct tzdbg_log_pos_t),
+				count, TZDBG_QSEE_LOG);
+
+		return _disp_log_stats_v2_nowait(g_qsee_log_v2, &clients_info->log_start_v2,
+			QSEE_LOG_BUF_SIZE_V2 - sizeof(struct tzdbg_log_pos_v2_t),
+			count, TZDBG_QSEE_LOG);
+	}
+#endif
 
 	if (!tzdbg.is_enlarged_buf)
 		return _disp_log_stats(g_qsee_log, &clients_info->log_start,
@@ -1767,6 +2044,47 @@ static int _disp_tme_log_stats(size_t count)
 	return 0;
 }
 #endif
+
+#if IS_ENABLED(CONFIG_MOTO_TZ_QSEE_LOG)
+
+static struct tzdbg_log_pos_t g_qsee_log_start = {0};
+static struct tzdbg_log_pos_v2_t g_qsee_log_start_v2 = {0};
+
+/*
+ * Dump qsee-log, and simultaneously dump tz-bsp log
+ */
+static void tzdbg_heartbeat_work(struct work_struct *work)
+{
+	pr_info("start qsee-log dumping");
+	while (!stop_dump_qsee) {
+		int len;
+		pr_info("wait for incoming qsee-log");
+		if (tzdbg.is_enlarged_buf) {
+			len = _disp_log_stats_v2(g_qsee_log_v2, &g_qsee_log_start_v2,
+					QSEE_LOG_BUF_SIZE_V2 - sizeof(struct tzdbg_log_pos_v2_t),
+					debug_rw_buf_size, TZDBG_QSEE_LOG);
+			pr_info("#%d log[%d]-position : (%d,%d) - (%d,%d)", __LINE__, TZDBG_QSEE_LOG,
+					g_qsee_log_start_v2.wrap, g_qsee_log_start_v2.offset,
+					g_qsee_log_v2->log_pos.wrap, g_qsee_log_v2->log_pos.offset);
+		} else {
+			len = _disp_log_stats(g_qsee_log, &g_qsee_log_start,
+					QSEE_LOG_BUF_SIZE - sizeof(struct tzdbg_log_pos_t),
+					debug_rw_buf_size, TZDBG_QSEE_LOG);
+			pr_info("#%d log[%d]-position : (%d,%d) - (%d,%d)", __LINE__, TZDBG_QSEE_LOG,
+					g_qsee_log_start.wrap, g_qsee_log_start.offset,
+					g_qsee_log->log_pos.wrap, g_qsee_log->log_pos.offset);
+		}
+		pr_info("%d-byte qsee-log already read", len);
+		dump(len);
+		if (atomic_read(&is_rd_locked)) {
+			atomic_set(&is_rd_locked, 0);
+			mutex_unlock(&tzdbg_mutex);
+		}
+    }
+    pr_info("stop qsee-log dumping");
+}
+
+#endif  // IS_ENABLED(CONFIG_MOTO_TZ_QSEE_LOG)
 
 static ssize_t tzdbg_fs_read_unencrypted(struct clients_info_t *clients_info, int tz_id,
 	char __user *buf, size_t count, loff_t *offp)
@@ -2074,6 +2392,28 @@ static __poll_t tzdbg_procfs_poll(struct file *file, struct poll_table_struct *w
 	return 0;
 }
 
+#if IS_ENABLED(CONFIG_MOTO_TZ_READ_NOWAIT)
+
+#define IOCTL_DUMP_ONCE_ON  _IO('M', 1)
+#define IOCTL_DUMP_ONCE_OFF _IO('M', 2)
+
+static long tzdbg_procfs_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+{
+	if (IOCTL_DUMP_ONCE_ON == cmd) {
+		pr_info("dump-once mode on");
+		g_read_nowait = true;
+	} else if (IOCTL_DUMP_ONCE_OFF == cmd) {
+		pr_info("dump-once mode off");
+		g_read_nowait = false;
+	} else {
+		pr_info("unknow command");
+		return -ENOTTY;
+	}
+	return 0;
+}
+
+#endif
+
 struct proc_ops tzdbg_fops = {
 	.proc_flags   = PROC_ENTRY_PERMANENT,
 	.proc_read    = tzdbg_fs_read,
@@ -2082,6 +2422,9 @@ struct proc_ops tzdbg_fops = {
 /* mandatory unless nonseekable_open() or equivalent is used */
 	.proc_lseek   = tzdbg_procfs_lseek,
 	.proc_poll    = tzdbg_procfs_poll,
+#if IS_ENABLED(CONFIG_MOTO_TZ_READ_NOWAIT)
+	.proc_ioctl   = tzdbg_procfs_ioctl,
+#endif
 };
 
 static int tzdbg_init_tme_log(struct platform_device *pdev, void __iomem *virt_iobase)
@@ -2668,6 +3011,15 @@ static int tz_log_probe(struct platform_device *pdev)
 
 	if (tzdbg_fs_init(pdev))
 		goto exit_free_disp_buf;
+
+#if IS_ENABLED(CONFIG_MOTO_TZ_QSEE_LOG)
+	tzdbg.heartbeat_work_q = alloc_workqueue("tzdbg workqueue", WQ_UNBOUND, 1);
+	if (tzdbg.heartbeat_work_q) {
+		INIT_WORK(&tzdbg.heartbeat_work, tzdbg_heartbeat_work);
+		queue_work(tzdbg.heartbeat_work_q, &tzdbg.heartbeat_work);
+	}
+#endif
+
 	return 0;
 
 exit_free_disp_buf:
@@ -2695,6 +3047,15 @@ static void tz_log_remove(struct platform_device *pdev)
 	tzdbg_free_qsee_log_buf(pdev);
 	if (!tzdbg.is_encrypted_log_enabled)
 		kfree(tzdbg.diag_buf);
+
+#if IS_ENABLED(CONFIG_MOTO_TZ_QSEE_LOG)
+	stop_dump_qsee = true;
+
+	if (tzdbg.heartbeat_work_q) {
+		cancel_work_sync(&tzdbg.heartbeat_work);
+		destroy_workqueue(tzdbg.heartbeat_work_q);
+    }
+#endif
 
 #if KERNEL_VERSION(6, 10, 0) > LINUX_VERSION_CODE
 	return 0;

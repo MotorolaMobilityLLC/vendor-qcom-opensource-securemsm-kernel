@@ -26,5 +26,6 @@ def define_canoe():
              "CONFIG_QCOM_SI_CORE",
              "CONFIG_MSM_TMECOM_QMP",
              "CONFIG_TZLOG_TIME_CONSOLIDATE",
+             "CONFIG_MOTO_TZ_READ_NOWAIT",
          ],
      )
