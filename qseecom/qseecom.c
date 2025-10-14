@@ -544,7 +544,7 @@ static void __qseecom_free_coherent_buf(uint32_t size,
 				u8 *vaddr, phys_addr_t paddr);
 
 #define QSEECOM_SCM_EBUSY_WAIT_MS 30
-#define QSEECOM_SCM_EBUSY_MAX_RETRY 67
+#define QSEECOM_SCM_EBUSY_MAX_RETRY 100
 #define QSEE_RESULT_FAIL_APP_BUSY 315
 
 static int __qseecom_scm_call2_locked(uint32_t smc_id, struct qseecom_scm_desc *desc)
